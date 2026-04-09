@@ -85,6 +85,7 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
             ContentItems { items: Vec::new() }
         }
     };
+    // There can't be more than one file with the same name:
     assert!(content_items.items.len() <= 1);
     let content = content_items.items.iter().next();
     let new_comment =
@@ -95,6 +96,7 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
     };
 
     if let Some(content) = content {
+        // GitHub API requires the SHA of the old file to update it
         let (mut content, sha) = (content.decoded_content().unwrap(), content.sha.clone());
         writeln!(&mut content, "{}", new_comment).expect("Could not add comment to file");
         debug!("Found existing file at {} with sha {}", path, sha);
