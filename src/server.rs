@@ -152,9 +152,12 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
+    let config = CONFIG.get().unwrap();
     octocrab::initialise(
         octocrab::Octocrab::builder()
-            .personal_token(CONFIG.get().unwrap().token.clone())
+            .personal_token(config.token.clone())
+            .base_uri(&config.github_api_url)
+            .context("Invalid GitHub API URL")?
             .build()?,
     );
 
@@ -163,7 +166,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     let svc = ServiceBuilder::new()
         .buffer(100)
-        .rate_limit(1, Duration::from_secs(10))
+        .rate_limit(1, Duration::from_secs(config.rate_limit_secs))
         .service(tower::service_fn(post_comment_service));
 
     let listener = TcpListener::bind(addr).await?;
