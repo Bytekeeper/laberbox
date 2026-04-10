@@ -1,12 +1,9 @@
-use crate::{Comment, Post, CONFIG};
+use crate::{CONFIG, Comment, Post};
 use anyhow::Context;
 use bytes::Bytes;
 use core::convert::Infallible;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
-use hyper::header::{
-    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
@@ -14,38 +11,37 @@ use hyper_util::service::TowerToHyperService;
 use log::{debug, info};
 use octocrab::models::repos::{CommitAuthor, ContentItems, Object};
 use octocrab::params::repos::Reference;
-use rand::rng;
 use rand::RngExt;
+use rand::rng;
 use std::fmt::Write;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 
+fn error_response(status: StatusCode, msg: &'static str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .body(Full::new(Bytes::from(msg)))
+        .unwrap()
+}
+
 async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    if req.method() == hyper::Method::OPTIONS {
-        return Ok(Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .header(ACCESS_CONTROL_ALLOW_METHODS, "OPTIONS, POST")
-            .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
-            .body(Full::new(Bytes::new()))
-            .unwrap());
-    }
     // Prevent crashing the service by simple DDOS attacks
     let body = Limited::new(req.into_body(), 100 * 1024);
-    let Ok(post_request) = body.collect().await.map(|c| c.to_bytes()) else {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::new(Bytes::from("Comment size limit exceeded")))
-            .unwrap());
+    let Ok(bytes) = body.collect().await.map(|c| c.to_bytes()) else {
+        return Ok(error_response(StatusCode::BAD_REQUEST, "Comment size limit exceeded"));
     };
-    let Ok(post): Result<Post, _> = serde_json::from_slice(&post_request) else {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::new(Bytes::from("Invalid JSON")))
-            .unwrap());
+    let Ok(post): Result<Post, _> = serde_urlencoded::from_bytes(&bytes) else {
+        return Ok(error_response(StatusCode::BAD_REQUEST, "Invalid form data"));
     };
+
+    if !post.url.is_empty()
+        && !post.url.starts_with("https://")
+        && !post.url.starts_with("http://")
+    {
+        return Ok(error_response(StatusCode::BAD_REQUEST, "URL must be http or https"));
+    }
 
     let time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -66,7 +62,7 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
     let config = CONFIG.get().unwrap();
     let path = format!(
         "{}/{}/comments.yaml",
-        config.content_dir,
+        config.content_dir.trim_matches('/'),
         post.path.trim_matches('/')
     );
 
@@ -95,7 +91,7 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
             ContentItems { items: Vec::new() }
         }
     };
-    // There can't be more than one file with the same name:
+
     assert!(content_items.items.len() <= 1);
     let content = content_items.items.first();
     let new_comment =
@@ -148,11 +144,9 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
     info!("New comment from {} added", comment.name);
 
     Ok(Response::builder()
-        .status(hyper::StatusCode::CREATED)
-        .header(ACCESS_CONTROL_ALLOW_METHODS, "OPTIONS, POST")
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
-        .body(Full::new(Bytes::from("That worked, now goeth forth")))
+        .status(StatusCode::SEE_OTHER)
+        .header("Location", post.redirect_url)
+        .body(Full::new(Bytes::new()))
         .unwrap())
 }
 

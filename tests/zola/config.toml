@@ -1,0 +1,7 @@
+base_url = "http://localhost"
+title = "Laberbox Test Site"
+compile_sass = false
+generate_feeds = false
+
+[extra]
+comment_server_url = "http://localhost:3000"

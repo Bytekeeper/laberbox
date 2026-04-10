@@ -1,0 +1,10 @@
+- id: '1715000000_123456789'
+  message: Hello from the test suite
+  name: Alice
+  url: 'https://alice.example.com'
+  date: 1715000000
+- id: '1715000060_987654321'
+  message: Another test comment
+  name: Bob
+  url: ''
+  date: 1715000060

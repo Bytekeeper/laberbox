@@ -10,7 +10,9 @@ pub struct Post {
     path: String,
     message: String,
     name: String,
+    #[serde(default)]
     url: String,
+    redirect_url: String,
 }
 
 /// This will be serialized into a comment file on GitHub
