@@ -24,11 +24,20 @@ struct Comment<'a> {
 }
 
 #[derive(Deserialize)]
+pub struct Committer {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Deserialize)]
 pub struct Config {
     pub listen: std::net::SocketAddr,
     pub token: String,
     pub owner: String,
     pub repo: String,
+    pub committer: Committer,
+    /// Root content directory in the repo, e.g. "content" for Hugo/Zola or "_posts" for Jekyll.
+    pub content_dir: String,
 }
 
 pub static CONFIG: OnceLock<Config> = OnceLock::new();

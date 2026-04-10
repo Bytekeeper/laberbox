@@ -1,43 +1,49 @@
 use crate::{Comment, Post, CONFIG};
+use anyhow::Context;
+use bytes::Bytes;
 use core::convert::Infallible;
-use http_body::Limited;
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Incoming;
 use hyper::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
 };
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use log::{debug, info};
 use octocrab::models::repos::{CommitAuthor, ContentItems, Object};
 use octocrab::params::repos::Reference;
-use rand::{thread_rng, Rng};
+use rand::rng;
+use rand::RngExt;
 use std::fmt::Write;
-use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::SystemTime;
-use tower::limit::{rate::Rate, RateLimit};
+use tokio::net::TcpListener;
+use tower::ServiceBuilder;
 
-async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body>> {
+async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.method() == hyper::Method::OPTIONS {
         return Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header(ACCESS_CONTROL_ALLOW_METHODS, "OPTIONS, POST")
             .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
-            .body("".into())
+            .body(Full::new(Bytes::new()))
             .unwrap());
     }
     // Prevent crashing the service by simple DDOS attacks
     let body = Limited::new(req.into_body(), 100 * 1024);
-    let Ok(post_request) = hyper::body::to_bytes(body).await else {
+    let Ok(post_request) = body.collect().await.map(|c| c.to_bytes()) else {
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
-            .body("Comment size limit exceeded".into())
+            .body(Full::new(Bytes::from("Comment size limit exceeded")))
             .unwrap());
     };
-    let Ok(post): Result<Post, _> = serde_json::from_slice(&*post_request) else {
+    let Ok(post): Result<Post, _> = serde_json::from_slice(&post_request) else {
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
-            .body("Invalid JSON".into())
+            .body(Full::new(Bytes::from("Invalid JSON")))
             .unwrap());
     };
 
@@ -45,7 +51,7 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let comment_id = format!("{}_{}", time, thread_rng().gen_range(0..999999999));
+    let comment_id = format!("{}_{}", time, rng().random_range(0..999999999u64));
 
     let comment = Comment {
         id: &comment_id,
@@ -58,7 +64,11 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
     let oc = octocrab::instance();
     let branch_name = format!("comments/{}", comment_id);
     let config = CONFIG.get().unwrap();
-    let path = format!("content{}comments.yaml", post.path);
+    let path = format!(
+        "{}/{}/comments.yaml",
+        config.content_dir,
+        post.path.trim_matches('/')
+    );
 
     let repo = oc.repos(&config.owner, &config.repo);
 
@@ -87,12 +97,13 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
     };
     // There can't be more than one file with the same name:
     assert!(content_items.items.len() <= 1);
-    let content = content_items.items.iter().next();
+    let content = content_items.items.first();
     let new_comment =
         serde_yaml::to_string(&[&comment]).expect("Could not convert comment to yaml");
     let author = CommitAuthor {
-        name: "Comment0r".to_string(),
-        email: "none@example.com".to_string(),
+        name: config.committer.name.clone(),
+        email: Some(config.committer.email.clone()),
+        date: None,
     };
 
     if let Some(content) = content {
@@ -141,7 +152,7 @@ async fn post_comment_service(req: Request<Body>) -> hyper::Result<Response<Body
         .header(ACCESS_CONTROL_ALLOW_METHODS, "OPTIONS, POST")
         .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header(ACCESS_CONTROL_ALLOW_HEADERS, "content-type")
-        .body("That worked, now goeth forth".into())
+        .body(Full::new(Bytes::from("That worked, now goeth forth")))
         .unwrap())
 }
 
@@ -153,15 +164,26 @@ pub async fn main() -> anyhow::Result<()> {
             .build()?,
     );
 
-    let addr = SocketAddr::from(CONFIG.get().unwrap().listen);
+    let addr = CONFIG.get().context("Missing config")?.listen;
     info!("Listening on {}", addr);
 
-    let post_comment_service = make_service_fn(|_conn| async {
-        Ok::<_, Infallible>(RateLimit::new(
-            service_fn(post_comment_service),
-            Rate::new(1, Duration::from_secs(10)),
-        ))
-    });
-    let server = Server::bind(&addr).serve(post_comment_service);
-    Ok(server.await?)
+    let svc = ServiceBuilder::new()
+        .buffer(100)
+        .rate_limit(1, Duration::from_secs(10))
+        .service(tower::service_fn(post_comment_service));
+
+    let listener = TcpListener::bind(addr).await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let svc = TowerToHyperService::new(svc.clone());
+        tokio::spawn(async move {
+            if let Err(err) = Builder::new(TokioExecutor::new())
+                .serve_connection(io, svc)
+                .await
+            {
+                log::error!("Error serving connection: {:?}", err);
+            }
+        });
+    }
 }
