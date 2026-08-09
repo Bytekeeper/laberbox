@@ -68,6 +68,29 @@ fn zola_renders_comments() {
         !with_html.contains("href=\"\""),
         "empty href rendered for URL-less comment"
     );
+
+    // Carol's comment replies to Alice's — it should render nested between Alice's
+    // message and Bob's top-level comment, not as its own top-level comment.
+    let alice_pos = with_html
+        .find("Hello from the test suite")
+        .expect("Alice's message not found");
+    let reply_pos = with_html
+        .find("Replying to Alice")
+        .expect("reply message not found");
+    let bob_pos = with_html
+        .find("Another test comment")
+        .expect("Bob's message not found");
+    assert!(
+        alice_pos < reply_pos && reply_pos < bob_pos,
+        "reply was not nested between its parent comment and the next top-level comment"
+    );
+    // A reply's own id still gets a stable anchor for direct linking
+    assert!(
+        with_html.contains("id=\"comment-1715000120_555555555\""),
+        "reply comment anchor id not found"
+    );
+    // Every top-level comment gets a reply toggle
+    assert!(with_html.contains("Submit reply"), "reply form not found");
     // Form is present
     assert!(
         with_html.contains("Submit comment"),

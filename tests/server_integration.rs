@@ -279,3 +279,109 @@ async fn comment_appends_to_existing_file() {
     let response = post_comment(port).await;
     assert_redirect(&response);
 }
+
+/// A reply carries the parent comment's id through to the stored YAML, and the
+/// PR/commit metadata calls it out as a reply rather than a top-level comment.
+#[tokio::test]
+async fn reply_is_recorded_with_parent_id() {
+    let github_mock = MockServer::start().await;
+    mount_common_mocks(&github_mock).await;
+
+    let existing_yaml =
+        "- id: \"old_comment\"\n  message: First!\n  name: Alice\n  url: ''\n  date: 1000\n  reply_to: ''\n";
+    let encoded = B64.encode(existing_yaml);
+
+    Mock::given(method("GET"))
+        .and(path(CONTENT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "type": "file",
+            "encoding": "base64",
+            "size": existing_yaml.len(),
+            "name": "comments.yaml",
+            "path": "content/blog/test-post/comments.yaml",
+            "content": encoded,
+            "sha": "existingsha123",
+            "url": "http://localhost",
+            "git_url": "http://localhost",
+            "html_url": "http://localhost",
+            "download_url": null,
+            "_links": { "self": "http://localhost", "git": "http://localhost", "html": "http://localhost" }
+        })))
+        .expect(1)
+        .mount(&github_mock)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path(CONTENT_PATH))
+        .and(FileContentContains(vec!["First!", "Nice reply!", "reply_to: old_comment"]))
+        .respond_with(ResponseTemplate::new(200).set_body_json(file_update_response()))
+        .expect(1)
+        .mount(&github_mock)
+        .await;
+
+    let port = free_port();
+    let _server = start_server(port, &github_mock.uri()).await;
+
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}"))
+        .form(&[
+            ("path", "/blog/test-post/"),
+            ("name", "Bob"),
+            ("message", "Nice reply!"),
+            (
+                "redirect_url",
+                "http://myblog.com/blog/test-post/#comment-old_comment",
+            ),
+            ("reply_to", "old_comment"),
+        ])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 303, "expected redirect");
+    assert_eq!(
+        response.headers()["location"],
+        "http://myblog.com/blog/test-post/#comment-old_comment",
+        "redirect should point back to the parent comment"
+    );
+}
+
+/// A filled-in honeypot field means the submission is from a bot: the server must
+/// respond as if it succeeded (so the bot has no signal to adapt on) but must not
+/// touch GitHub at all.
+#[tokio::test]
+async fn honeypot_submission_is_dropped_without_touching_github() {
+    // No mocks mounted: any GitHub call made here fails the test (missing mock == panic
+    // during the request, since server.rs unwraps on GitHub responses).
+    let github_mock = MockServer::start().await;
+
+    let port = free_port();
+    let _server = start_server(port, &github_mock.uri()).await;
+
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}"))
+        .form(&[
+            ("path", "/blog/test-post/"),
+            ("name", "Spam Bot"),
+            ("url", "https://example.com"),
+            ("message", "Buy now!"),
+            ("redirect_url", "http://myblog.com/blog/test-post/#comments"),
+            ("email", "bot@spam.example"),
+        ])
+        .send()
+        .await
+        .unwrap();
+
+    assert_redirect(&response);
+    assert_eq!(
+        github_mock.received_requests().await.unwrap().len(),
+        0,
+        "honeypot submission should never reach the GitHub API"
+    );
+}

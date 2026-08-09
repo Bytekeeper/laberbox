@@ -26,6 +26,14 @@ fn error_response(status: StatusCode, msg: &'static str) -> Response<Full<Bytes>
         .unwrap()
 }
 
+fn redirect_response(location: String) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header("Location", location)
+        .body(Full::new(Bytes::new()))
+        .unwrap()
+}
+
 async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
     // Prevent crashing the service by simple DDOS attacks
     let body = Limited::new(req.into_body(), 100 * 1024);
@@ -35,6 +43,14 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
     let Ok(post): Result<Post, _> = serde_urlencoded::from_bytes(&bytes) else {
         return Ok(error_response(StatusCode::BAD_REQUEST, "Invalid form data"));
     };
+
+    if !post.email.is_empty() {
+        // Bots fill every field they see; real visitors never see this one. Respond
+        // exactly as if the comment were accepted so the bot has no signal to adapt on,
+        // but skip GitHub entirely.
+        info!("Honeypot triggered by '{}', dropping submission", post.name);
+        return Ok(redirect_response(post.redirect_url));
+    }
 
     if !post.url.is_empty()
         && !post.url.starts_with("https://")
@@ -55,6 +71,12 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
         name: &post.name,
         url: &post.url,
         date: time,
+        reply_to: &post.reply_to,
+    };
+    let commit_verb = if comment.reply_to.is_empty() {
+        "comment"
+    } else {
+        "reply"
     };
 
     let oc = octocrab::instance();
@@ -109,7 +131,7 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
         debug!("Found existing file at {} with sha {}", path, sha);
         repo.update_file(
             &path,
-            format!("Added comment from '{}'", comment.name),
+            format!("Added {} from '{}'", commit_verb, comment.name),
             content,
             sha,
         )
@@ -122,7 +144,7 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
         debug!("Creating new file at {}", path);
         repo.create_file(
             &path,
-            format!("Added comment from '{}'", comment.name),
+            format!("Added {} from '{}'", commit_verb, comment.name),
             new_comment,
         )
         .branch(&branch_name)
@@ -134,20 +156,16 @@ async fn post_comment_service(req: Request<Incoming>) -> Result<Response<Full<By
 
     oc.pulls(&config.owner, &config.repo)
         .create(
-            format!("New comment from {}", comment.name),
+            format!("New {} from {}", commit_verb, comment.name),
             branch_name,
             "master",
         )
         .send()
         .await
         .expect("Could not create PR");
-    info!("New comment from {} added", comment.name);
+    info!("New {} from {} added", commit_verb, comment.name);
 
-    Ok(Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header("Location", post.redirect_url)
-        .body(Full::new(Bytes::new()))
-        .unwrap())
+    Ok(redirect_response(post.redirect_url))
 }
 
 #[tokio::main]

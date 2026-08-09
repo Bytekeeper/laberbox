@@ -13,6 +13,13 @@ pub struct Post {
     #[serde(default)]
     url: String,
     redirect_url: String,
+    /// Honeypot: real visitors never see or fill this field. If it's non-empty, the
+    /// submission is from a bot and is silently dropped.
+    #[serde(default)]
+    email: String,
+    /// id of the comment this is a reply to, or empty for a top-level comment.
+    #[serde(default)]
+    reply_to: String,
 }
 
 /// This will be serialized into a comment file on GitHub
@@ -23,6 +30,7 @@ struct Comment<'a> {
     name: &'a str,
     url: &'a str,
     date: u64,
+    reply_to: &'a str,
 }
 
 #[derive(Deserialize)]
